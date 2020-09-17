@@ -29,3 +29,8 @@
     name:  "{{ fence_kdump_packages }}"
     state: 'installed'
   when: cluster_configure_fence_kdump|bool
+
+- name: Install all fence-agents packages
+  yum:
+    name:  "{{ fence_agents_packages }}"
+    state: 'installed'
