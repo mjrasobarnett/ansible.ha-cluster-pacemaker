@@ -1,14 +1,4 @@
 ---
-- name: Add a group to the inventory for remote nodes
-  group_by:
-    key: "cluster_node_is_remote_{{ cluster_node_is_remote | bool }}"
-
-- name: Check if cluster consist of at least 2 nodes
-  fail:
-    msg: 'Cluster must have at least 2 full members'
-  when: groups['cluster_node_is_remote_False']|default([])|count() < 2
-  run_once: true
-
 - name: Include distribution version specific variables - RHEL/CentOS
   include_vars: "el{{ ansible_distribution_major_version }}.yml"
   when: ansible_distribution == 'RedHat' or ansible_distribution == 'CentOS'
@@ -33,31 +23,16 @@
   include_tasks: install_normal.yml
   when: not use_local_media|bool
 
-# WARNING: the hostname is resolved from /etc/hosts file! If you change hostname
-# of machine through /etc/hosts the ansible will pick it up and use it!
-- name: Add hosts to /etc/hosts (using default (GW) IPv4 address)
-  lineinfile:
-    dest: '/etc/hosts'
-    regexp: "{{ hostvars[item]['ansible_default_ipv4']['address'] }} "
-    line: >
-      {{ hostvars[item]['ansible_default_ipv4']['address'] }}
-      {{ hostvars[item][cluster_hostname_fact] }}
-  with_items: "{{ play_hosts }}"
-  when:
-    - cluster_etc_hosts | bool
-    - hostvars[item]['ansible_'+cluster_net_iface] is not defined
-
 - name: Add hosts to /etc/hosts (using alternative interface)
-  lineinfile:
-    dest: '/etc/hosts'
-    regexp: "{{ hostvars[item]['ansible_'+cluster_net_iface]['ipv4']['address'] }} "
-    line: >
-      {{ hostvars[item]['ansible_'+cluster_net_iface]['ipv4']['address'] }}
-      {{ hostvars[item][cluster_hostname_fact] }}
-  with_items: "{{ play_hosts }}"
   when:
     - cluster_etc_hosts | bool
-    - hostvars[item]['ansible_'+cluster_net_iface] is defined
+  blockinfile:
+    path: "/etc/hosts"
+    block: |
+      {{ item.ip }} {{ item.hostname }}
+    marker: "# {mark} ANSIBLE MANAGED BLOCK {{ item.hostname }}"
+    state: present
+  loop: "{{ cluster_nodes }}"
 
 - name: Create cluster system group
   group:
@@ -100,35 +75,22 @@
 
 - name: Authorize cluster nodes
   pcs_auth:
-    node_name: "{{ hostvars[item][cluster_hostname_fact] }}"
+    node_name: "{{ item.hostname }}"
     username: "{{ cluster_user }}"
     password: "{{ cluster_user_pass }}"
-  with_items: "{{ play_hosts }}"
-  when: not cluster_node_is_remote | bool
-
-- name: set corosync redundant ring node ip if requested
-  set_fact:
-    rrp_ip: "{{ hostvars[inventory_hostname]['ansible_'+rrp_interface].ipv4.address }}"
-  when: rrp_ip is not defined and rrp_interface is defined and rrp_interface and 'ansible_'+rrp_interface in hostvars[inventory_hostname]
-
-- name: validate redundant ring ip
-  fail:
-    msg: >-
-      invalid redundant ip {{ rrp_ip }} for {{ ansible_hostname }}:
-      must be different than default ip {{ ansible_default_ipv4.address|default(ansible_all_ipv4_addresses[0]) }}
-  when: rrp_ip is defined and rrp_ip == ansible_default_ipv4.address|default(ansible_all_ipv4_addresses[0])
-  any_errors_fatal: true
+  loop: "{{ cluster_nodes }}"
+  when: cluster_control_node | bool
 
 - name: Setup cluster
   pcs_cluster:
     node_list: >-
-      {% for item in groups['cluster_node_is_remote_False'] %}
-      {{ hostvars[item][cluster_hostname_fact] }}{% if hostvars[item].rrp_ip is defined %},{{ hostvars[item].rrp_ip }}{% endif %}
+      {% for item in cluster_nodes %}
+      {{ item.hostname }}
       {% endfor %}
     cluster_name: "{{ cluster_name }}"
     transport: "{{ cluster_transport }}"
     allowed_node_changes: "{% if allow_cluster_expansion|bool %}add{% else %}none{% endif %}"
-  run_once: true
+  when: cluster_control_node | bool
 
 - name: Start cluster services on all nodes
   service:
@@ -150,31 +112,6 @@
     - cluster_enable_service | bool
     - not cluster_node_is_remote | bool
 
-- block:
-    - name: Get pcs status
-      command: pcs status
-      run_once: true
-      changed_when: false
-      check_mode: false
-      register: pcs_status
-
-    - name: Add remote node
-      vars:
-        cluster_hostname: "{{ hostvars[inventory_hostname][cluster_hostname_fact] }}"
-      command: pcs cluster node add-remote {{ cluster_hostname }}
-      when:
-        - cluster_node_is_remote | bool
-        - (pcs_status.stdout | regex_search('\\b' ~ cluster_hostname ~ '\\s+\\(ocf::pacemaker:remote\\)') or '') | length == 0
-  vars:
-    delegate_host: "{{ hostvars[groups['cluster_node_is_remote_False'][0]].inventory_hostname }}"
-    # NOTE: Without this, the host's ansible_host variable will not be
-    # respected when using delegate_to.
-    ansible_host: "{{ hostvars[delegate_host].ansible_host | default(delegate_host) }}"
-  when:
-    - groups['cluster_node_is_remote_False'] is defined
-    - groups['cluster_node_is_remote_True']|default([])|count() > 0
-  delegate_to: "{{ delegate_host }}"
-
 ### fencing setup
 - name: Setup automatic fence_xvm
   include_tasks: fence_xvm.yml
@@ -187,6 +124,3 @@
 - name: Setup fence_kdump
   include_tasks: fence_kdump.yml
   when: cluster_configure_fence_kdump is defined and cluster_configure_fence_kdump|bool
-
-- name: Setup custom fence devices
-  include_tasks: fence_custom.yml
