@@ -89,6 +89,7 @@
       {% endfor %}
     cluster_name: "{{ cluster_name }}"
     transport: "{{ cluster_transport }}"
+    token: "{{ cluster_corosync_token | default(omit) }}"
     allowed_node_changes: "{% if allow_cluster_expansion|bool %}add{% else %}none{% endif %}"
   when: cluster_control_node | bool
 
